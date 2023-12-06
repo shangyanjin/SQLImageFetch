@@ -1,3 +1,8 @@
+/*
+HostManager provides a lightweight command-line tool for managing the hosts file on Windows.
+Author: Shang Yanjin
+Email: shangyanjin@msn.com
+*/
 package main
 
 import (
