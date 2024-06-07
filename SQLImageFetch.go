@@ -14,41 +14,86 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("用法: program <sql文件路径>")
-		return
-	}
-	filePath := os.Args[1]
+	// Default SQL file path
+	var filePath string
 
+	// Check if the SQL file path is provided as an argument
+	if len(os.Args) < 2 {
+		files, err := filepath.Glob("*.sql")
+		if err != nil || len(files) == 0 {
+			fmt.Println("Usage: program <SQL file path>")
+			fmt.Println("No SQL file specified and no .sql file found in the current directory.")
+			return
+		}
+		// Use the first found .sql file in the current directory
+		filePath = files[0]
+		fmt.Printf("No SQL file specified. Using %s as the default file.\n", filePath)
+	} else {
+		filePath = os.Args[1]
+	}
+
+	// Read the content of the SQL file
 	fileContent, err := os.ReadFile(filePath)
 	if err != nil {
 		panic(err)
 	}
 
+	// Parse the SQL data to extract unique URLs
 	result := parseSQLData(string(fileContent))
 	uniqueURLs := removeDuplicates(result)
 
+	// Print the total number of unique URLs found
 	totalFiles := len(uniqueURLs)
-	fmt.Printf("共发现 %d 个唯一的远程文件\n", totalFiles)
+	fmt.Printf("Found %d unique remote files.\n", totalFiles)
 
+	// Create a directory to store downloaded images
 	imageDir := filepath.Join(filepath.Dir(filePath), "image")
 	if err := os.MkdirAll(imageDir, os.ModePerm); err != nil {
 		panic(err)
 	}
 
-	downloadedFiles := 0
-	for i, url := range uniqueURLs {
-		fmt.Printf("正在下载 %d/%d: %s\n", i+1, totalFiles, url)
-		if downloadImage(url, imageDir) {
-			downloadedFiles++
-		}
+	// Download images using multiple threads
+	var wg sync.WaitGroup
+	urlChan := make(chan string, totalFiles)
+	threadCount := 3
+	progress := make(chan string, totalFiles)
+
+	for i := 0; i < threadCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for url := range urlChan {
+				if downloadImage(url, imageDir) {
+					progress <- url
+				}
+			}
+		}()
 	}
-	fmt.Printf("下载结束。共 %d 个文件，本次下载 %d 个。\n", totalFiles, downloadedFiles)
+
+	// Start a goroutine to display progress
+	go func() {
+		downloadedFiles := 0
+		for url := range progress {
+			downloadedFiles++
+			fmt.Printf("Downloaded %d/%d: %s\n", downloadedFiles, totalFiles, url)
+		}
+	}()
+
+	for _, url := range uniqueURLs {
+		urlChan <- url
+	}
+	close(urlChan)
+
+	wg.Wait()
+	close(progress)
+	fmt.Printf("Download completed. Total files: %d.\n", totalFiles)
 }
 
+// removeDuplicates removes duplicate URLs from the parsed SQL data
 func removeDuplicates(data [][]string) []string {
 	urlMap := make(map[string]bool)
 	var uniqueURLs []string
@@ -63,6 +108,7 @@ func removeDuplicates(data [][]string) []string {
 	return uniqueURLs
 }
 
+// parseSQLData parses the SQL file content to extract image URLs
 func parseSQLData(sqlData string) [][]string {
 	var result [][]string
 	scanner := bufio.NewScanner(strings.NewReader(sqlData))
@@ -85,41 +131,45 @@ func parseSQLData(sqlData string) [][]string {
 	return result
 }
 
+// downloadImage downloads an image from the specified URL and saves it to the specified directory
 func downloadImage(url, dir string) bool {
 	tokens := strings.Split(url, "/")
 	fileName := tokens[len(tokens)-1]
 	filePath := filepath.Join(dir, fileName)
 
+	// Check if the file already exists and its size matches the remote file
 	if fileInfo, err := os.Stat(filePath); !os.IsNotExist(err) {
 		resp, err := http.Head(url)
 		if err != nil {
-			fmt.Println("获取远程文件信息失败:", url, err)
+			fmt.Println("Failed to get remote file info:", url, err)
 			return false
 		}
 		defer resp.Body.Close()
 
 		if resp.ContentLength == fileInfo.Size() {
-			fmt.Println("文件已存在，且大小一致，跳过下载:", url)
+			fmt.Println("File already exists and size matches, skipping download:", url)
 			return false
 		}
 	}
 
+	// Download the image
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("下载失败:", url, err)
+		fmt.Println("Download failed:", url, err)
 		return false
 	}
 	defer resp.Body.Close()
 
+	// Create the file and write the downloaded content to it
 	file, err := os.Create(filePath)
 	if err != nil {
-		fmt.Println("创建文件失败:", filePath, err)
+		fmt.Println("Failed to create file:", filePath, err)
 		return false
 	}
 	defer file.Close()
 
 	if _, err := io.Copy(file, resp.Body); err != nil {
-		fmt.Println("写入文件失败:", filePath, err)
+		fmt.Println("Failed to write to file:", filePath, err)
 		return false
 	}
 
